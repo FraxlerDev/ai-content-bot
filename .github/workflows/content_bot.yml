@@ -1,0 +1,48 @@
+name: AI Content Bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode"
+        required: true
+        default: "test"
+        type: choice
+        options:
+          - test
+          - production
+
+  schedule:
+    - cron: "0 9 * * *"
+      timezone: "Europe/Kyiv"
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run AI Content Bot
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_MODE: ${{ github.event_name == 'schedule' && 'production' || inputs.mode }}
+        run: |
+          python main.py
