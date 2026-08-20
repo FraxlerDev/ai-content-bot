@@ -23,7 +23,7 @@ WORKSHEET_NAME = "Content"
 
 GEMINI_MODEL = "gemini-3.6-flash"
 
-MAX_TWEET_LENGTH = 240
+MAX_TWEET_LENGTH_PER_LANGUAGE = 240
 
 TEST_ID = "TEST"
 
@@ -257,14 +257,89 @@ def clean_tweet(text):
     ):
         text = text[1:-1].strip()
 
-    # Convert newlines into spaces.
+    # Normalize whitespace while preserving intentional line breaks.
     text = re.sub(
-        r"\s+",
+        r"\r\n?",
+        "\n",
+        text,
+    )
+
+    text = re.sub(
+        r"[ \t]+",
         " ",
         text,
     )
 
-    return text.strip()
+    text = re.sub(
+        r"(?im)^(UA|EN):\s*(\S)",
+        r"\1:\n\2",
+        text,
+    )
+
+    lines = []
+
+    for line in text.splitlines():
+        line = line.strip()
+
+        if not line:
+            continue
+
+        line = re.sub(
+            r"(?<!\w)#\w+",
+            "",
+            line,
+        ).strip()
+
+        if (
+            len(line) >= 2
+            and line[0] in {'"', "“", "«"}
+            and line[-1] in {'"', "”", "»"}
+        ):
+            line = line[1:-1].strip()
+
+        if line:
+            lines.append(line)
+
+    text = "\n".join(lines)
+
+    return format_sentences_on_new_lines(text)
+
+
+def format_sentences_on_new_lines(text):
+    formatted_lines = []
+
+    for line in text.splitlines():
+        stripped = line.strip()
+
+        if not stripped:
+            continue
+
+        if re.fullmatch(r"(UA|EN|UK|Українська|English):", stripped, re.I):
+            formatted_lines.append(stripped)
+            continue
+
+        sentences = re.split(
+            r"(?<=[.!?])\s+",
+            stripped,
+        )
+
+        for sentence in sentences:
+            sentence = sentence.strip()
+
+            if sentence:
+                formatted_lines.append(sentence)
+
+    return "\n".join(formatted_lines).strip()
+
+
+def get_language_section(tweet, label):
+    pattern = rf"(?ims)^{label}:\s*(.*?)(?=^(?:UA|EN):|\Z)"
+    match = re.search(pattern, tweet)
+
+    if not match:
+        return ""
+
+    return match.group(1).strip()
 
 
 def validate_tweet(tweet):
@@ -273,29 +348,32 @@ def validate_tweet(tweet):
     if not tweet:
         errors.append("Tweet is empty.")
 
-    if len(tweet) > MAX_TWEET_LENGTH:
-        errors.append(
-            f"Tweet is {len(tweet)} characters; "
-            f"maximum is {MAX_TWEET_LENGTH}."
-        )
+    ua_text = get_language_section(tweet, "UA")
+    en_text = get_language_section(tweet, "EN")
+
+    if not ua_text:
+        errors.append("Tweet must include a UA section.")
+
+    if not en_text:
+        errors.append("Tweet must include an EN section.")
+
+    for label, section in (("UA", ua_text), ("EN", en_text)):
+        if (
+            section
+            and len(section) > MAX_TWEET_LENGTH_PER_LANGUAGE
+        ):
+            errors.append(
+                f"{label} tweet is {len(section)} characters; "
+                f"maximum is {MAX_TWEET_LENGTH_PER_LANGUAGE}."
+            )
 
     hashtag_count = len(
         re.findall(r"(?<!\w)#\w+", tweet)
     )
 
-    if hashtag_count < 1:
+    if hashtag_count:
         errors.append(
-            "Tweet must contain at least 1 hashtag."
-        )
-
-    if hashtag_count > 2:
-        errors.append(
-            "Tweet must contain no more than 2 hashtags."
-        )
-
-    if "\n" in tweet:
-        errors.append(
-            "Tweet must be a single line."
+            "Tweet must not contain hashtags."
         )
 
     return errors
@@ -307,12 +385,12 @@ def generate_tweet(topic, angle):
     )
 
     prompt = f"""
-You are a concise Ukrainian-language social media writer.
+You are a concise bilingual social media writer.
 
 Main content niche:
 AI, Skills & the Future of Work.
 
-Generate ONE short tweet based on:
+Generate TWO short versions of the same tweet based on:
 
 Topic:
 {topic}
@@ -321,20 +399,27 @@ Angle:
 {angle}
 
 Requirements:
-- Ukrainian language.
-- Maximum 240 characters total.
+- First version in Ukrainian.
+- Second version in English.
+- Maximum 240 characters per language version.
 - One concise, strong insight.
-- Include 1 or 2 relevant hashtags.
+- No hashtags.
 - Natural modern Ukrainian.
+- Natural modern English.
 - Clear and intellectually interesting.
 - Prefer a strong observation over generic motivation.
+- Each sentence must start on a new line.
 - No greeting.
 - No introduction.
 - No explanation.
 - No quotation marks around the tweet.
 - No bullet points.
 - No emojis unless genuinely necessary.
-- Output ONLY the final tweet.
+- Output ONLY this format:
+UA:
+Ukrainian tweet
+EN:
+English tweet
 """
 
     last_error = None
@@ -364,11 +449,13 @@ Original:
 {tweet}
 
 Rules:
-- Ukrainian language.
-- Maximum 240 characters.
-- Exactly 1 or 2 hashtags.
+- Include both UA and EN sections.
+- Ukrainian version in the UA section.
+- English version in the EN section.
+- Maximum 240 characters per language version.
+- No hashtags.
 - One concise insight.
-- One line only.
+- Each sentence on a new line.
 - No quotation marks.
 - No explanation.
 - Output ONLY the corrected tweet.
