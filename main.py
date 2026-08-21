@@ -30,7 +30,7 @@ CLOUDFLARE_IMAGE_MODEL = "@cf/black-forest-labs/flux-1-schnell"
 
 CLOUDFLARE_IMAGE_STEPS = 4
 
-FINAL_IMAGE_SIZE = "768x1024"
+FINAL_IMAGE_SIZE = "1024x768"
 
 MAX_TWEET_LENGTH_PER_LANGUAGE = 240
 
@@ -502,9 +502,9 @@ Angle:
 # ============================================================
 
 def extract_image_title(tweet, topic):
-    ua_text = get_language_section(tweet, "UA")
+    en_text = get_language_section(tweet, "EN")
 
-    for line in ua_text.splitlines():
+    for line in en_text.splitlines():
         line = line.strip()
 
         if line:
@@ -527,7 +527,7 @@ Text context:
 {tweet}
 
 Visual requirements:
-- Vertical 3:4 composition.
+- Horizontal 4:3 composition.
 - Main image should occupy the full canvas.
 - Sophisticated, modern, realistic editorial style.
 - Theme: AI, skills, and the future of work.
@@ -683,11 +683,10 @@ def add_gradient_and_title(image_bytes, title):
         ) / (
             height - gradient_top
         )
-        shade = int(255 * (1 - progress))
-        alpha = int(110 + 125 * progress)
+        alpha = int(235 * progress)
 
         for x in range(width):
-            pixels[x, y] = (shade, shade, shade, alpha)
+            pixels[x, y] = (0, 0, 0, alpha)
 
     image = Image.alpha_composite(
         image,
