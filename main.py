@@ -675,7 +675,7 @@ def add_gradient_and_title(image_bytes, title):
         (0, 0, 0, 0),
     )
     pixels = overlay.load()
-    gradient_top = height // 2
+    gradient_top = 0
 
     for y in range(gradient_top, height):
         progress = (
