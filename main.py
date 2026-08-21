@@ -28,7 +28,7 @@ GEMINI_MODEL = "gemini-3.6-flash"
 
 CLOUDFLARE_IMAGE_MODEL = "@cf/black-forest-labs/flux-1-schnell"
 
-CLOUDFLARE_IMAGE_STEPS = 4
+CLOUDFLARE_IMAGE_STEPS = 8
 
 FINAL_IMAGE_SIZE = "1024x768"
 
