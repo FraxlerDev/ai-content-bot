@@ -26,16 +26,9 @@ WORKSHEET_NAME = "Content"
 
 GEMINI_MODEL = "gemini-3.6-flash"
 
-OPENAI_IMAGE_MODEL = os.environ.get(
-    "OPENAI_IMAGE_MODEL",
-    "gpt-image-1",
-)
+CLOUDFLARE_IMAGE_MODEL = "@cf/black-forest-labs/flux-1-schnell"
 
-OPENAI_IMAGE_FALLBACK_MODEL = "dall-e-3"
-
-OPENAI_IMAGE_SIZE = "1024x1536"
-
-OPENAI_DALLE_IMAGE_SIZE = "1024x1792"
+CLOUDFLARE_IMAGE_STEPS = 4
 
 FINAL_IMAGE_SIZE = "768x1024"
 
@@ -53,8 +46,12 @@ GEMINI_API_KEY = os.environ.get(
     "GEMINI_API_KEY"
 )
 
-OPENAI_API_KEY = os.environ.get(
-    "OPENAI_API_KEY"
+CLOUDFLARE_ACCOUNT_ID = os.environ.get(
+    "CLOUDFLARE_ACCOUNT_ID"
+)
+
+CLOUDFLARE_API_TOKEN = os.environ.get(
+    "CLOUDFLARE_API_TOKEN"
 )
 
 TELEGRAM_BOT_TOKEN = os.environ.get(
@@ -74,7 +71,8 @@ def validate_environment():
     required = {
         "GOOGLE_SERVICE_ACCOUNT_JSON": GOOGLE_SERVICE_ACCOUNT_JSON,
         "GEMINI_API_KEY": GEMINI_API_KEY,
-        "OPENAI_API_KEY": OPENAI_API_KEY,
+        "CLOUDFLARE_ACCOUNT_ID": CLOUDFLARE_ACCOUNT_ID,
+        "CLOUDFLARE_API_TOKEN": CLOUDFLARE_API_TOKEN,
         "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN,
         "TELEGRAM_CHAT_ID": TELEGRAM_CHAT_ID,
     }
@@ -500,7 +498,7 @@ Angle:
 
 
 # ============================================================
-# OPENAI IMAGE GENERATION
+# CLOUDFLARE IMAGE GENERATION
 # ============================================================
 
 def extract_image_title(tweet, topic):
@@ -545,80 +543,40 @@ def generate_base_image(topic, angle, tweet):
         tweet,
     )
 
-    errors = []
-
-    for model in [
-        OPENAI_IMAGE_MODEL,
-        OPENAI_IMAGE_FALLBACK_MODEL,
-    ]:
-        try:
-            return request_openai_image(
-                model,
-                prompt,
-            )
-        except Exception as exc:
-            errors.append(
-                f"{model}: {exc}"
-            )
-
-    raise RuntimeError(
-        "OpenAI image generation failed. "
-        + " | ".join(errors)
-    )
-
-
-def request_openai_image(model, prompt):
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "n": 1,
-    }
-
-    if model.startswith("dall-e-3"):
-        payload.update(
-            {
-                "size": OPENAI_DALLE_IMAGE_SIZE,
-                "quality": "standard",
-                "response_format": "b64_json",
-                "style": "natural",
-            }
-        )
-    else:
-        payload.update(
-            {
-                "size": OPENAI_IMAGE_SIZE,
-                "quality": "medium",
-                "output_format": "png",
-            }
-        )
-
     response = requests.post(
-        "https://api.openai.com/v1/images/generations",
+        (
+            "https://api.cloudflare.com/client/v4/accounts/"
+            f"{CLOUDFLARE_ACCOUNT_ID}/ai/run/"
+            f"{CLOUDFLARE_IMAGE_MODEL}"
+        ),
         headers={
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}",
             "Content-Type": "application/json",
         },
-        json=payload,
+        json={
+            "prompt": prompt,
+            "steps": CLOUDFLARE_IMAGE_STEPS,
+        },
         timeout=180,
     )
 
     if response.status_code != 200:
         raise RuntimeError(
-            "API error: "
+            "Cloudflare Workers AI API error: "
             + response.text[:500]
         )
 
     data = response.json()
-    images = data.get("data", [])
+    result = data.get("result", {})
+    image = result.get("image")
 
-    if not images or not images[0].get("b64_json"):
+    if not data.get("success") or not image:
         raise RuntimeError(
-            "OpenAI returned no image data."
+            "Cloudflare returned no image data: "
+            + str(data)[:500]
         )
 
-    return b64decode(
-        images[0]["b64_json"]
-    )
+    return b64decode(image)
 
 
 def get_title_font(size):
@@ -1062,7 +1020,7 @@ def run_production():
         )
         print(tweet)
 
-        print("\nGenerating image with OpenAI...")
+        print("\nGenerating image with Cloudflare Workers AI...")
 
         delivery_mode = send_content_to_telegram(
             topic,
