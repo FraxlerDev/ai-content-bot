@@ -26,9 +26,16 @@ WORKSHEET_NAME = "Content"
 
 GEMINI_MODEL = "gemini-3.6-flash"
 
-OPENAI_IMAGE_MODEL = "gpt-image-1"
+OPENAI_IMAGE_MODEL = os.environ.get(
+    "OPENAI_IMAGE_MODEL",
+    "gpt-image-1",
+)
+
+OPENAI_IMAGE_FALLBACK_MODEL = "dall-e-3"
 
 OPENAI_IMAGE_SIZE = "1024x1536"
+
+OPENAI_DALLE_IMAGE_SIZE = "1024x1792"
 
 FINAL_IMAGE_SIZE = "768x1024"
 
@@ -532,30 +539,72 @@ Visual requirements:
 
 
 def generate_base_image(topic, angle, tweet):
+    prompt = build_image_prompt(
+        topic,
+        angle,
+        tweet,
+    )
+
+    errors = []
+
+    for model in [
+        OPENAI_IMAGE_MODEL,
+        OPENAI_IMAGE_FALLBACK_MODEL,
+    ]:
+        try:
+            return request_openai_image(
+                model,
+                prompt,
+            )
+        except Exception as exc:
+            errors.append(
+                f"{model}: {exc}"
+            )
+
+    raise RuntimeError(
+        "OpenAI image generation failed. "
+        + " | ".join(errors)
+    )
+
+
+def request_openai_image(model, prompt):
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "n": 1,
+    }
+
+    if model.startswith("dall-e-3"):
+        payload.update(
+            {
+                "size": OPENAI_DALLE_IMAGE_SIZE,
+                "quality": "standard",
+                "response_format": "b64_json",
+                "style": "natural",
+            }
+        )
+    else:
+        payload.update(
+            {
+                "size": OPENAI_IMAGE_SIZE,
+                "quality": "medium",
+                "output_format": "png",
+            }
+        )
+
     response = requests.post(
         "https://api.openai.com/v1/images/generations",
         headers={
             "Authorization": f"Bearer {OPENAI_API_KEY}",
             "Content-Type": "application/json",
         },
-        json={
-            "model": OPENAI_IMAGE_MODEL,
-            "prompt": build_image_prompt(
-                topic,
-                angle,
-                tweet,
-            ),
-            "n": 1,
-            "size": OPENAI_IMAGE_SIZE,
-            "quality": "medium",
-            "output_format": "png",
-        },
+        json=payload,
         timeout=180,
     )
 
     if response.status_code != 200:
         raise RuntimeError(
-            "OpenAI image API error: "
+            "API error: "
             + response.text[:500]
         )
 
@@ -746,6 +795,35 @@ def generate_tweet_image(topic, angle, tweet):
     )
 
 
+def send_content_to_telegram(topic, angle, tweet):
+    try:
+        photo = generate_tweet_image(
+            topic,
+            angle,
+            tweet,
+        )
+
+        send_photo_to_telegram(
+            photo,
+            tweet,
+        )
+
+        return "photo"
+
+    except Exception as exc:
+        print(
+            "WARNING: Image generation or photo delivery failed. "
+            "Sending text only."
+        )
+        print(
+            f"Image error: {exc}"
+        )
+
+        send_text_to_telegram(tweet)
+
+        return "text"
+
+
 # ============================================================
 # TELEGRAM
 # ============================================================
@@ -892,19 +970,14 @@ def run_test():
 
     print("\n[4/5] Generating image and testing Telegram...")
 
-    photo = generate_tweet_image(
+    delivery_mode = send_content_to_telegram(
         topic,
         angle,
         tweet,
     )
 
-    send_photo_to_telegram(
-        photo,
-        tweet,
-    )
-
     print(
-        "OK - Telegram photo delivered."
+        f"OK - Telegram {delivery_mode} delivered."
     )
 
     print("\n[5/5] Google Sheets integrity...")
@@ -991,21 +1064,14 @@ def run_production():
 
         print("\nGenerating image with OpenAI...")
 
-        photo = generate_tweet_image(
+        delivery_mode = send_content_to_telegram(
             topic,
             angle,
             tweet,
         )
 
-        print("\nSending photo to Telegram...")
-
-        send_photo_to_telegram(
-            photo,
-            tweet,
-        )
-
         print(
-            "Telegram photo delivery successful."
+            f"Telegram {delivery_mode} delivery successful."
         )
 
         print("\nUpdating Google Sheets...")
