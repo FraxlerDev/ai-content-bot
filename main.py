@@ -2,12 +2,15 @@ import json
 import os
 import re
 import sys
+from base64 import b64decode
+from io import BytesIO
 from datetime import datetime, timezone
 
 import gspread
 import requests
 from google import genai
 from google.oauth2.service_account import Credentials
+from PIL import Image, ImageDraw, ImageFont
 
 
 # ============================================================
@@ -23,7 +26,15 @@ WORKSHEET_NAME = "Content"
 
 GEMINI_MODEL = "gemini-3.6-flash"
 
+OPENAI_IMAGE_MODEL = "gpt-image-1"
+
+OPENAI_IMAGE_SIZE = "1024x1536"
+
+FINAL_IMAGE_SIZE = "768x1024"
+
 MAX_TWEET_LENGTH_PER_LANGUAGE = 240
+
+TELEGRAM_CAPTION_LIMIT = 1024
 
 TEST_ID = "TEST"
 
@@ -33,6 +44,10 @@ GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get(
 
 GEMINI_API_KEY = os.environ.get(
     "GEMINI_API_KEY"
+)
+
+OPENAI_API_KEY = os.environ.get(
+    "OPENAI_API_KEY"
 )
 
 TELEGRAM_BOT_TOKEN = os.environ.get(
@@ -52,6 +67,7 @@ def validate_environment():
     required = {
         "GOOGLE_SERVICE_ACCOUNT_JSON": GOOGLE_SERVICE_ACCOUNT_JSON,
         "GEMINI_API_KEY": GEMINI_API_KEY,
+        "OPENAI_API_KEY": OPENAI_API_KEY,
         "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN,
         "TELEGRAM_CHAT_ID": TELEGRAM_CHAT_ID,
     }
@@ -477,10 +493,268 @@ Angle:
 
 
 # ============================================================
+# OPENAI IMAGE GENERATION
+# ============================================================
+
+def extract_image_title(tweet, topic):
+    ua_text = get_language_section(tweet, "UA")
+
+    for line in ua_text.splitlines():
+        line = line.strip()
+
+        if line:
+            return line[:90]
+
+    return str(topic).strip()[:90]
+
+
+def build_image_prompt(topic, angle, tweet):
+    return f"""
+Create a polished editorial social media visual for this idea.
+
+Topic:
+{topic}
+
+Angle:
+{angle}
+
+Text context:
+{tweet}
+
+Visual requirements:
+- Vertical 3:4 composition.
+- Main image should occupy the full canvas.
+- Sophisticated, modern, realistic editorial style.
+- Theme: AI, skills, and the future of work.
+- No text, no captions, no logos, no watermarks.
+- Leave the lower half visually calm enough for a title overlay.
+"""
+
+
+def generate_base_image(topic, angle, tweet):
+    response = requests.post(
+        "https://api.openai.com/v1/images/generations",
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": OPENAI_IMAGE_MODEL,
+            "prompt": build_image_prompt(
+                topic,
+                angle,
+                tweet,
+            ),
+            "n": 1,
+            "size": OPENAI_IMAGE_SIZE,
+            "quality": "medium",
+            "output_format": "png",
+        },
+        timeout=180,
+    )
+
+    if response.status_code != 200:
+        raise RuntimeError(
+            "OpenAI image API error: "
+            + response.text[:500]
+        )
+
+    data = response.json()
+    images = data.get("data", [])
+
+    if not images or not images[0].get("b64_json"):
+        raise RuntimeError(
+            "OpenAI returned no image data."
+        )
+
+    return b64decode(
+        images[0]["b64_json"]
+    )
+
+
+def get_title_font(size):
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        "C:\\Windows\\Fonts\\arialbd.ttf",
+        "C:\\Windows\\Fonts\\arial.ttf",
+    ]
+
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            continue
+
+    return ImageFont.load_default()
+
+
+def wrap_title(text, font, max_width, draw):
+    words = text.split()
+    lines = []
+    current = ""
+
+    for word in words:
+        candidate = (
+            f"{current} {word}".strip()
+        )
+        bbox = draw.textbbox(
+            (0, 0),
+            candidate,
+            font=font,
+        )
+
+        if bbox[2] <= max_width:
+            current = candidate
+            continue
+
+        if current:
+            lines.append(current)
+
+        current = word
+
+    if current:
+        lines.append(current)
+
+    return lines[:4]
+
+
+def add_gradient_and_title(image_bytes, title):
+    image = Image.open(
+        BytesIO(image_bytes)
+    ).convert("RGBA")
+
+    target_width, target_height = [
+        int(value)
+        for value in FINAL_IMAGE_SIZE.split("x")
+    ]
+
+    source_width, source_height = image.size
+    target_ratio = target_width / target_height
+    source_ratio = source_width / source_height
+
+    if source_ratio < target_ratio:
+        crop_height = int(source_width / target_ratio)
+        crop_top = (source_height - crop_height) // 2
+        image = image.crop(
+            (
+                0,
+                crop_top,
+                source_width,
+                crop_top + crop_height,
+            )
+        )
+    elif source_ratio > target_ratio:
+        crop_width = int(source_height * target_ratio)
+        crop_left = (source_width - crop_width) // 2
+        image = image.crop(
+            (
+                crop_left,
+                0,
+                crop_left + crop_width,
+                source_height,
+            )
+        )
+
+    image = image.resize(
+        (target_width, target_height),
+        Image.LANCZOS,
+    )
+
+    width, height = image.size
+    overlay = Image.new(
+        "RGBA",
+        image.size,
+        (0, 0, 0, 0),
+    )
+    pixels = overlay.load()
+    gradient_top = height // 2
+
+    for y in range(gradient_top, height):
+        progress = (
+            y - gradient_top
+        ) / (
+            height - gradient_top
+        )
+        shade = int(255 * (1 - progress))
+        alpha = int(110 + 125 * progress)
+
+        for x in range(width):
+            pixels[x, y] = (shade, shade, shade, alpha)
+
+    image = Image.alpha_composite(
+        image,
+        overlay,
+    )
+
+    draw = ImageDraw.Draw(image)
+    margin = 54
+    font_size = 58
+
+    while font_size >= 34:
+        font = get_title_font(font_size)
+        lines = wrap_title(
+            title,
+            font,
+            width - margin * 2,
+            draw,
+        )
+        line_height = int(font_size * 1.18)
+        total_height = line_height * len(lines)
+
+        if total_height <= 270:
+            break
+
+        font_size -= 4
+
+    y = height - margin - total_height
+
+    for line in lines:
+        draw.text(
+            (margin, y),
+            line,
+            font=font,
+            fill=(255, 255, 255, 255),
+        )
+        y += line_height
+
+    output = BytesIO()
+    image.convert("RGB").save(
+        output,
+        format="PNG",
+        optimize=True,
+    )
+    output.seek(0)
+
+    return output
+
+
+def generate_tweet_image(topic, angle, tweet):
+    base_image = generate_base_image(
+        topic,
+        angle,
+        tweet,
+    )
+    title = extract_image_title(
+        tweet,
+        topic,
+    )
+
+    return add_gradient_and_title(
+        base_image,
+        title,
+    )
+
+
+# ============================================================
 # TELEGRAM
 # ============================================================
 
 def send_to_telegram(tweet):
+    return send_text_to_telegram(tweet)
+
+
+def send_text_to_telegram(tweet):
     url = (
         f"https://api.telegram.org/"
         f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -508,6 +782,51 @@ def send_to_telegram(tweet):
     if not data.get("ok"):
         raise RuntimeError(
             "Telegram rejected message: "
+            + str(data)
+        )
+
+    return data
+
+
+def send_photo_to_telegram(photo, caption):
+    if len(caption) > TELEGRAM_CAPTION_LIMIT:
+        raise RuntimeError(
+            f"Telegram caption is {len(caption)} characters; "
+            f"maximum is {TELEGRAM_CAPTION_LIMIT}."
+        )
+
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    )
+
+    response = requests.post(
+        url,
+        data={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "caption": caption,
+        },
+        files={
+            "photo": (
+                "content.png",
+                photo,
+                "image/png",
+            ),
+        },
+        timeout=60,
+    )
+
+    if response.status_code != 200:
+        raise RuntimeError(
+            "Telegram photo API error: "
+            + response.text[:500]
+        )
+
+    data = response.json()
+
+    if not data.get("ok"):
+        raise RuntimeError(
+            "Telegram rejected photo: "
             + str(data)
         )
 
@@ -571,12 +890,21 @@ def run_test():
         f"Character count: {len(tweet)}"
     )
 
-    print("\n[4/5] Testing Telegram...")
+    print("\n[4/5] Generating image and testing Telegram...")
 
-    send_to_telegram(tweet)
+    photo = generate_tweet_image(
+        topic,
+        angle,
+        tweet,
+    )
+
+    send_photo_to_telegram(
+        photo,
+        tweet,
+    )
 
     print(
-        "OK - Telegram message delivered."
+        "OK - Telegram photo delivered."
     )
 
     print("\n[5/5] Google Sheets integrity...")
@@ -661,12 +989,23 @@ def run_production():
         )
         print(tweet)
 
-        print("\nSending to Telegram...")
+        print("\nGenerating image with OpenAI...")
 
-        send_to_telegram(tweet)
+        photo = generate_tweet_image(
+            topic,
+            angle,
+            tweet,
+        )
+
+        print("\nSending photo to Telegram...")
+
+        send_photo_to_telegram(
+            photo,
+            tweet,
+        )
 
         print(
-            "Telegram delivery successful."
+            "Telegram photo delivery successful."
         )
 
         print("\nUpdating Google Sheets...")
